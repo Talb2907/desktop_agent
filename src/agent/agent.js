@@ -10,7 +10,7 @@ const { resolveConfirmation } = require('./confirm');
  * @param {Function} onStep      - Streamed step callback
  * @returns {Promise<{text: string, steps: Array}>}
  */
-async function runAgent(userMessage, history = [], onStep = () => {}) {
+async function runAgent(userMessage, history = [], onStep = () => {}, signal) {
   const steps = [];
 
   function emit(step) {
@@ -18,7 +18,7 @@ async function runAgent(userMessage, history = [], onStep = () => {}) {
     onStep(step);
   }
 
-  const text = await runOrchestrator(userMessage, history, emit);
+  const text = await runOrchestrator(userMessage, history, emit, signal);
   return { text, steps };
 }
 

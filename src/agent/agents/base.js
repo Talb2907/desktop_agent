@@ -2,15 +2,19 @@ const Anthropic = require('@anthropic-ai/sdk');
 const { executeTool } = require('../tools');
 const { waitForConfirmation } = require('../confirm');
 
+const { MODEL } = require('../config');
+
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = 'claude-sonnet-4-5';
-const MAX_ROUNDS = 8;
+const MAX_ROUNDS = 15;
+const SPECIALIST_TIMEOUT_MS = 120_000; // 2 minutes per specialist run
 
 // Tools that always require user confirmation before execution
 const WRITE_TOOLS = new Set([
   'create_file', 'append_to_file', 'delete_file',
   'create_word_file', 'create_excel_file', 'create_pdf_file', 'create_powerpoint_file',
   'gmail_send',
+  'run_command',
+  'kill_process',
 ]);
 
 // Keywords that make a browser_click destructive/irreversible → require confirmation
@@ -24,11 +28,6 @@ function isDestructiveClick(description = '') {
   const lower = description.toLowerCase();
   return DESTRUCTIVE_CLICK_KEYWORDS.some((kw) => lower.includes(kw));
 }
-
-// Tools whose results may contain a base64 screenshot for Claude to see
-const SCREENSHOT_TOOLS = new Set([
-  'browser_open', 'browser_screenshot', 'gmail_open_inbox',
-]);
 
 /**
  * Push a tool result onto the toolResults array.
@@ -73,7 +72,11 @@ function pushToolResult(toolResults, toolUse, result, tag) {
  * @param {Function} options.emit         - Step callback (adds agent tag automatically)
  * @returns {Promise<string>}             - Agent's final text answer
  */
-async function runSpecialist({ agentName, systemPrompt, toolDefs, task, emit }) {
+function isAbortError(err) {
+  return err?.name === 'AbortError' || err?.message?.includes('This operation was aborted');
+}
+
+async function _runSpecialistLoop({ agentName, systemPrompt, toolDefs, task, emit, signal }) {
   // Wrap emit to tag every step with the agent name
   function tag(step) {
     emit({ ...step, agent: agentName });
@@ -83,16 +86,17 @@ async function runSpecialist({ agentName, systemPrompt, toolDefs, task, emit }) 
   let finalText = null;
   let round = 0;
 
+  try {
   while (round < MAX_ROUNDS) {
     round++;
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4096,
-      system: systemPrompt,
-      tools: toolDefs,
-      messages,
+    const stream = client.messages.stream(
+      { model: MODEL, max_tokens: 4096, system: systemPrompt, tools: toolDefs, messages },
+      { signal }
+    ).on('text', (text) => {
+      tag({ type: 'text_delta', text });
     });
+    const response = await stream.finalMessage();
 
     const textBlocks = response.content.filter((b) => b.type === 'text');
     const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
@@ -163,8 +167,21 @@ async function runSpecialist({ agentName, systemPrompt, toolDefs, task, emit }) 
 
     break;
   }
+  } catch (err) {
+    if (isAbortError(err)) {
+      return 'Task was cancelled.';
+    }
+    throw err;
+  }
 
   return finalText || 'I was unable to complete this task.';
 }
 
-module.exports = { runSpecialist };
+async function runSpecialist(options) {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${options.agentName} timed out after ${SPECIALIST_TIMEOUT_MS / 1000}s`)), SPECIALIST_TIMEOUT_MS)
+  );
+  return Promise.race([_runSpecialistLoop(options), timeout]);
+}
+
+module.exports = { runSpecialist, isAbortError };

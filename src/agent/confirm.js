@@ -1,19 +1,18 @@
-// Shared confirmation gate — only one write action can be pending at a time.
-// agent.js re-exports resolveConfirmation so main.js IPC handler works unchanged.
+// Confirmation gate with a FIFO queue.
+// Multiple simultaneous write tools (e.g. from parallel specialists) are serialized:
+// each waits its turn rather than racing to overwrite a single _resolve slot.
 
-let _resolve = null;
+const _queue = [];
 
 function waitForConfirmation() {
   return new Promise((resolve) => {
-    _resolve = resolve;
+    _queue.push(resolve);
   });
 }
 
 function resolveConfirmation(approved) {
-  if (_resolve) {
-    _resolve(approved);
-    _resolve = null;
-  }
+  const resolve = _queue.shift();
+  if (resolve) resolve(approved);
 }
 
 module.exports = { waitForConfirmation, resolveConfirmation };

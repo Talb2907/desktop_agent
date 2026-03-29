@@ -14,13 +14,14 @@ Rules:
 - For "what did we talk about" requests: call get_recent_conversations and summarize the topics.
 - Be specific about what was saved or found.`;
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'MemoryAgent',
     systemPrompt: SYSTEM_PROMPT,
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 

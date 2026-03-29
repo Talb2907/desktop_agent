@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const os = require('os');
 const db = require('./db');
+const terminalSession = require('./terminalSession');
 const { embed, searchSimilar } = require('./embeddings');
 
 // Paths that write/delete tools will never touch
@@ -97,7 +98,10 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'read_file',
-    description: 'Read the contents of a file from disk.',
+    description:
+      'Read the contents of a file from disk. Returns up to 5 000 characters. ' +
+      'If the result contains truncated:true, the file was cut off — use read_file_chunk ' +
+      'with the returned totalChars to read the rest in ranges.',
     input_schema: {
       type: 'object',
       properties: {
@@ -526,6 +530,50 @@ const TOOL_DEFINITIONS = [
       'Save the current compose window as a draft by closing it. Gmail auto-saves the draft.',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
+
+  // ── Terminal tools ────────────────────────────────────────────────────────
+
+  {
+    name: 'run_command',
+    description:
+      'Run a shell command. stdout, stderr, and exit_code are returned. The working directory persists across calls — pass cwd to change it (this replaces running \'cd\'). Use for: installing packages, running scripts, checking git status, starting dev servers, reading output. REQUIRES user confirmation.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command:    { type: 'string', description: 'Shell command to execute.' },
+        cwd:        { type: 'string', description: 'Working directory for this command. Also sets the persistent cwd for all subsequent calls.' },
+        timeout_ms: { type: 'number', description: 'Max milliseconds to wait (default 30000, max 120000).' },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'read_file_chunk',
+    description:
+      'Read a specific line range from a file. Use for reading long command output saved to a file, error logs, or stack traces. No confirmation needed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        filepath:   { type: 'string', description: 'Absolute path to the file.' },
+        start_line: { type: 'number', description: 'First line to return (1-based, inclusive).' },
+        end_line:   { type: 'number', description: 'Last line to return (1-based, inclusive).' },
+      },
+      required: ['filepath', 'start_line', 'end_line'],
+    },
+  },
+  {
+    name: 'kill_process',
+    description:
+      'Kill a running process by PID. Use to stop a dev server, hung process, or background task. REQUIRES user confirmation.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pid:   { type: 'number', description: 'Process ID to kill.' },
+        force: { type: 'boolean', description: 'If true, force-kill immediately (SIGKILL / taskkill /F). Default false.' },
+      },
+      required: ['pid'],
+    },
+  },
 ];
 
 // ── Tool implementations ──────────────────────────────────────────────────────
@@ -929,11 +977,22 @@ function resolveOutputPath(filename, dirPath) {
 
 async function createWordFile({ filename, content, path: dirPath }) {
   try {
-    const { Document, Packer, Paragraph, TextRun } = require('docx');
+    const { Document, Packer, Paragraph, TextRun, AlignmentType } = require('docx');
     const absPath = resolveOutputPath(filename, dirPath);
 
+    const hebrewChars = (content.match(/[\u0590-\u05FF]/g) || []).length;
+    const isRtl = hebrewChars > content.length * 0.1;
+
     const paragraphs = content.split('\n').map(
-      (line) => new Paragraph({ children: [new TextRun(line)] })
+      (line) => new Paragraph({
+        bidirectional: isRtl,
+        alignment: isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT,
+        children: [new TextRun({
+          text: line,
+          rightToLeft: isRtl,
+          ...(isRtl && { language: { value: 'he-IL', bidi: 'he-IL' } }),
+        })],
+      })
     );
 
     const doc = new Document({ sections: [{ children: paragraphs }] });
@@ -1369,6 +1428,88 @@ async function gmailCreateDraft() {
   }
 }
 
+// ── Terminal tool implementations ─────────────────────────────────────────────
+
+function runCommand({ command, cwd: cwdInput, timeout_ms }) {
+  let effectiveCwd = terminalSession.getCwd();
+
+  if (cwdInput) {
+    effectiveCwd = resolvePath(cwdInput);
+    terminalSession.setCwd(effectiveCwd);
+  }
+
+  const timeout = Math.min(Number(timeout_ms) || 30000, 120000);
+
+  const result = spawnSync('cmd.exe', ['/c', command], {
+    cwd: effectiveCwd,
+    timeout,
+    encoding: 'utf8',
+  });
+
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    return { stdout: '', stderr: 'Command timed out', exit_code: -1, cwd: effectiveCwd };
+  }
+
+  const MAX_OUTPUT = 8000;
+
+  function capOutput(raw) {
+    if (!raw || raw.length <= MAX_OUTPUT) return { text: raw || '', truncated: false };
+    return {
+      text: raw.slice(-MAX_OUTPUT),
+      truncated: true,
+      totalLength: raw.length,
+      note: `Output truncated — showing last ${MAX_OUTPUT} of ${raw.length} chars. Pipe to a file for the full output.`,
+    };
+  }
+
+  const stdoutCapped = capOutput(result.stdout);
+  const stderrCapped = capOutput(result.stderr);
+
+  return {
+    stdout: stdoutCapped.text,
+    stdout_truncated: stdoutCapped.truncated || undefined,
+    stderr: stderrCapped.text,
+    stderr_truncated: stderrCapped.truncated || undefined,
+    exit_code: result.status !== null ? result.status : -1,
+    cwd: effectiveCwd,
+    ...(stdoutCapped.note ? { stdout_note: stdoutCapped.note } : {}),
+    ...(stderrCapped.note ? { stderr_note: stderrCapped.note } : {}),
+  };
+}
+
+function readFileChunk({ filepath, start_line, end_line }) {
+  try {
+    const resolvedPath = resolvePath(filepath);
+    const raw = fs.readFileSync(resolvedPath, 'utf8');
+    const lines = raw.split('\n');
+    const total_lines = lines.length;
+    const sliced = lines.slice(start_line - 1, end_line);
+    return {
+      lines: sliced,
+      start_line,
+      end_line,
+      total_lines,
+      content: sliced.join('\n'),
+    };
+  } catch (err) {
+    if (err.code === 'ENOENT') return { error: `File not found: ${filepath}` };
+    return { error: `Could not read file: ${err.message}` };
+  }
+}
+
+function killProcess({ pid, force = false }) {
+  const args = force ? ['/F', '/PID', String(pid)] : ['/PID', String(pid)];
+  const result = spawnSync('taskkill', args, { encoding: 'utf8' });
+  const success = result.status === 0;
+  return {
+    success,
+    pid,
+    message: success
+      ? `Process ${pid} terminated.`
+      : (result.stderr || result.stdout || `Failed to kill process ${pid}.`).trim(),
+  };
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 async function executeTool(name, input) {
@@ -1435,6 +1576,12 @@ async function executeTool(name, input) {
       return gmailSend(input);
     case 'gmail_create_draft':
       return gmailCreateDraft(input);
+    case 'run_command':
+      return runCommand(input);
+    case 'read_file_chunk':
+      return readFileChunk(input);
+    case 'kill_process':
+      return killProcess(input);
     default:
       return { error: `Unknown tool: ${name}` };
   }

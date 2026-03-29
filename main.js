@@ -5,10 +5,8 @@ const os = require('os');
 const { runAgent, resolveConfirmation } = require('./src/agent/agent');
 const { initDb } = require('./src/agent/db');
 const { getRealDesktopPath } = require('./src/agent/tools');
-
-console.log('[startup] os.homedir()       =', os.homedir());
-console.log('[startup] getRealDesktopPath =', getRealDesktopPath());
-console.log('[startup] process.cwd()      =', process.cwd());
+const { closeBrowser } = require('./src/agent/browserSession');
+const { closeGmail } = require('./src/agent/agents/gmailSession');
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -47,6 +45,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+app.on('before-quit', async (e) => {
+  e.preventDefault();
+  try {
+    await Promise.allSettled([closeBrowser(), closeGmail()]);
+  } finally {
+    app.exit(0);
+  }
+});
+
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
@@ -57,15 +64,29 @@ ipcMain.handle('agent:confirm', (_event, { approved }) => {
   return { ok: true };
 });
 
+// Track the AbortController for the current agent run
+let _currentAbortController = null;
+
+// IPC: cancel the current agent run
+ipcMain.handle('agent:stop', () => {
+  if (_currentAbortController) {
+    _currentAbortController.abort();
+  }
+  return { ok: true };
+});
+
 // IPC: handle agent messages, stream steps back to renderer
 ipcMain.handle('agent:run', async (event, { message, history }) => {
+  _currentAbortController = new AbortController();
   try {
     const result = await runAgent(message, history, (step) => {
       event.sender.send('agent:step', step);
-    });
+    }, _currentAbortController.signal);
     return { success: true, result };
   } catch (err) {
     console.error('Agent error:', err);
     return { success: false, error: err.message };
+  } finally {
+    _currentAbortController = null;
   }
 });

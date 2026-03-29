@@ -13,13 +13,14 @@ Rules:
 - Never make up URLs — only fetch URLs explicitly provided in the task.
 - Be concise in your summary.`;
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'WebAgent',
     systemPrompt: SYSTEM_PROMPT,
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 

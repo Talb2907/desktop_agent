@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // Detect if text is predominantly Hebrew (RTL)
 function isHebrew(text) {
@@ -131,9 +133,16 @@ function ConfirmationCard({ step, onConfirm }) {
     <div className={`border ${borderColor} rounded-xl p-3 text-xs bg-slate-900 w-fit max-w-[85%] flex flex-col gap-2`}>
       <div className={`font-semibold ${headerColor}`}>{titles[tool] || `⚙️ ${tool}?`}</div>
 
-      {/* File tools: show path */}
-      {input.path && !isBrowser && !isGmailSend && (
-        <div className="text-slate-300 font-mono break-all">{input.path}</div>
+      {/* File tools: show path or filename */}
+      {!isBrowser && !isGmailSend && (input.path || input.filename) && (
+        <div className="flex flex-col gap-0.5">
+          {input.filename && (
+            <div className="text-slate-300 font-mono break-all">{input.filename}</div>
+          )}
+          {input.path && (
+            <div className="text-slate-500 font-mono break-all text-[11px]">{input.path}</div>
+          )}
+        </div>
       )}
 
       {/* Browser tools: show URL / selector / text */}
@@ -262,17 +271,15 @@ function Message({ msg, onConfirm }) {
     );
   }
 
-  const rtlAnswer = isHebrew(msg.content);
-
   return (
     <div className="flex flex-col gap-1">
       <StepIndicator steps={msg.steps} onConfirm={onConfirm} />
       <div className="flex justify-start">
         <div
-          dir={rtlAnswer ? 'rtl' : 'ltr'}
-          className="max-w-[85%] bg-slate-800 text-slate-100 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap"
+          dir={rtl ? 'rtl' : 'ltr'}
+          className="max-w-[85%] bg-slate-800 text-slate-100 rounded-2xl rounded-tl-sm px-4 py-2.5 text-sm leading-relaxed prose prose-invert prose-sm max-w-none"
         >
-          {msg.content}
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
         </div>
       </div>
     </div>
@@ -283,11 +290,11 @@ function ThinkingBubble({ steps, onConfirm }) {
   return (
     <div className="flex flex-col gap-1">
       <StepIndicator steps={steps} onConfirm={onConfirm} />
-      {steps.length === 0 && (
-        <div className="flex items-center gap-2 text-slate-500 text-xs">
-          <span className="animate-pulse">●</span> Thinking…
-        </div>
-      )}
+      <div className="flex items-center gap-1.5 text-slate-500 text-xs mt-0.5">
+        <span className="animate-pulse">●</span>
+        <span className="animate-pulse" style={{ animationDelay: '0.2s' }}>●</span>
+        <span className="animate-pulse" style={{ animationDelay: '0.4s' }}>●</span>
+      </div>
     </div>
   );
 }
@@ -297,6 +304,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [liveSteps, setLiveSteps] = useState([]);
+
   const [pendingConfirm, setPendingConfirm] = useState(false);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
@@ -326,6 +334,10 @@ export default function App() {
   const handleConfirm = async (approved) => {
     setPendingConfirm(false);
     await window.agent.confirm(approved);
+  };
+
+  const handleStop = async () => {
+    await window.agent.stop();
   };
 
   const sendMessage = async () => {
@@ -366,12 +378,29 @@ export default function App() {
     }
   };
 
+  const handleNewChat = () => {
+    if (loading) return;
+    setMessages([]);
+    setInput('');
+    setLiveSteps([]);
+    setPendingConfirm(false);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
   const handleKey = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
   };
+
+  // Auto-resize textarea whenever input value changes (handles typing, paste, and programmatic sets)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  }, [input]);
 
   const rtlInput = isHebrew(input);
   const inputDisabled = loading || pendingConfirm;
@@ -384,7 +413,18 @@ export default function App() {
           <span className="text-indigo-400 text-lg">⬡</span>
           <span className="font-semibold text-sm tracking-wide">Personal Agent</span>
         </div>
-        <span className="text-xs text-slate-500">claude-sonnet-4-5</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-slate-500">claude-sonnet-4‑5</span>
+          {messages.length > 0 && !loading && (
+            <button
+              onClick={handleNewChat}
+              className="text-xs text-slate-500 hover:text-slate-300 transition px-2 py-1 rounded hover:bg-slate-800"
+              title="Start a new conversation"
+            >
+              + New chat
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Messages */}
@@ -436,11 +476,16 @@ export default function App() {
             disabled={inputDisabled}
             className="flex-1 resize-none bg-slate-800 text-slate-100 placeholder-slate-500 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 leading-relaxed"
             style={{ minHeight: '42px', maxHeight: '160px' }}
-            onInput={(e) => {
-              e.target.style.height = 'auto';
-              e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
-            }}
           />
+          {loading && (
+            <button
+              onClick={handleStop}
+              title="Stop"
+              className="bg-slate-700 hover:bg-red-700 transition rounded-xl px-4 py-2.5 text-sm font-medium flex-shrink-0 text-slate-300 hover:text-white"
+            >
+              ■
+            </button>
+          )}
           <button
             onClick={sendMessage}
             disabled={inputDisabled || !input.trim()}

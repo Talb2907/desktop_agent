@@ -1,20 +1,7 @@
-const { TOOL_DEFINITIONS } = require('../tools');
+const { TOOL_DEFINITIONS, getRealDesktopPath } = require('../tools');
 const { runSpecialist } = require('./base');
 const os = require('os');
-const { execSync } = require('child_process');
-
-let _desktop = null;
-function getDesktop() {
-  if (_desktop) return _desktop;
-  try {
-    _desktop = execSync('[Environment]::GetFolderPath("Desktop")', {
-      shell: 'powershell.exe', timeout: 5000,
-    }).toString().trim();
-  } catch {
-    _desktop = require('path').join(os.homedir(), 'Desktop');
-  }
-  return _desktop;
-}
+const path = require('path');
 
 const FILE_TOOL_NAMES = new Set([
   'search_files', 'read_file', 'read_excel',
@@ -31,8 +18,8 @@ Your job: search, read, and write files and folders on this machine.
 
 Key paths:
 - Home: ${os.homedir()}
-- Desktop: ${getDesktop()}
-- Documents: ${require('path').join(os.homedir(), 'Documents')}
+- Desktop: ${getRealDesktopPath()}
+- Documents: ${path.join(os.homedir(), 'Documents')}
 
 File creation tools and when to use them:
 - create_file — plain text (.txt, .md, .csv, .html, etc.)
@@ -49,13 +36,14 @@ Rules:
 - Be concise — summarize what you found or did, don't dump raw data.`;
 }
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'FileAgent',
     systemPrompt: buildSystemPrompt(),
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 

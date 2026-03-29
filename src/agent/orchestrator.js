@@ -8,9 +8,12 @@ const memoryAgent = require('./agents/memoryAgent');
 const outlookAgent = require('./agents/outlookAgent');
 const browserAgent = require('./agents/browserAgent');
 const gmailAgent = require('./agents/gmailAgent');
+const terminalAgent = require('./agents/terminalAgent');
+
+const { MODEL } = require('./config');
+const { isAbortError } = require('./agents/base');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const MODEL = 'claude-sonnet-4-5';
 const MAX_ROUNDS = 6;
 
 // ── Orchestrator tool definitions ─────────────────────────────────────────────
@@ -106,6 +109,21 @@ const ORCHESTRATOR_TOOLS = [
       required: ['task'],
     },
   },
+  {
+    name: 'call_terminal_agent',
+    description:
+      'Delegate a terminal/shell task to the TerminalAgent. Use for: running shell commands, installing npm/pip packages, running scripts, starting dev servers, checking git status, reading build logs or error output, killing processes. Do NOT use for simple file reads — use call_file_agent for that.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        task: {
+          type: 'string',
+          description: 'Complete, self-contained description of the terminal task, including the directory to work in if relevant.',
+        },
+      },
+      required: ['task'],
+    },
+  },
 ];
 
 // ── Agent dispatch ────────────────────────────────────────────────────────────
@@ -117,6 +135,7 @@ const AGENT_MAP = {
   call_outlook_agent: outlookAgent,
   call_browser_agent: browserAgent,
   call_gmail_agent: gmailAgent,
+  call_terminal_agent: terminalAgent,
 };
 
 const AGENT_DISPLAY_NAMES = {
@@ -126,6 +145,7 @@ const AGENT_DISPLAY_NAMES = {
   call_outlook_agent: 'OutlookAgent',
   call_browser_agent: 'BrowserAgent',
   call_gmail_agent: 'GmailAgent',
+  call_terminal_agent: 'TerminalAgent',
 };
 
 // ── Memory helpers ────────────────────────────────────────────────────────────
@@ -156,7 +176,7 @@ async function getRelevantMemories(userMessage) {
 
 // ── Main orchestrator loop ────────────────────────────────────────────────────
 
-async function runOrchestrator(userMessage, history = [], emit) {
+async function runOrchestrator(userMessage, history = [], emit, signal) {
   emit({ type: 'thinking', text: 'Thinking…', agent: 'Orchestrator' });
 
   const relevantMemories = await getRelevantMemories(userMessage);
@@ -171,16 +191,17 @@ async function runOrchestrator(userMessage, history = [], emit) {
   let finalText = null;
   let round = 0;
 
+  try {
   while (round < MAX_ROUNDS) {
     round++;
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 4096,
-      system: systemPrompt,
-      tools: ORCHESTRATOR_TOOLS,
-      messages,
+    const stream = client.messages.stream(
+      { model: MODEL, max_tokens: 4096, system: systemPrompt, tools: ORCHESTRATOR_TOOLS, messages },
+      { signal }
+    ).on('text', (text) => {
+      emit({ type: 'text_delta', text, agent: 'Orchestrator' });
     });
+    const response = await stream.finalMessage();
 
     const textBlocks = response.content.filter((b) => b.type === 'text');
     const toolUseBlocks = response.content.filter((b) => b.type === 'tool_use');
@@ -200,42 +221,50 @@ async function runOrchestrator(userMessage, history = [], emit) {
     if (toolUseBlocks.length > 0) {
       messages.push({ role: 'assistant', content: response.content });
 
-      const toolResults = [];
+      // Run all dispatched specialists in parallel
+      const settled = await Promise.all(
+        toolUseBlocks.map(async (toolUse) => {
+          const agentName = AGENT_DISPLAY_NAMES[toolUse.name];
+          const specialist = AGENT_MAP[toolUse.name];
 
-      for (const toolUse of toolUseBlocks) {
-        const agentName = AGENT_DISPLAY_NAMES[toolUse.name];
-        const specialist = AGENT_MAP[toolUse.name];
+          emit({
+            type: 'agent_handoff',
+            agent: agentName,
+            task: toolUse.input.task,
+            text: `→ ${agentName}`,
+          });
 
-        emit({
-          type: 'agent_handoff',
-          agent: agentName,
-          task: toolUse.input.task,
-          text: `→ ${agentName}`,
-        });
+          const result = await specialist.run(toolUse.input.task, emit, signal);
 
-        const result = await specialist.run(toolUse.input.task, emit);
+          emit({
+            type: 'agent_return',
+            agent: agentName,
+            summary: result,
+            text: `← ${agentName} done`,
+          });
 
-        emit({
-          type: 'agent_return',
-          agent: agentName,
-          summary: result,
-          text: `← ${agentName} done`,
-        });
+          return { toolUse, agentName, result };
+        })
+      );
 
+      const toolResults = settled.map(({ toolUse, agentName, result }) => {
         toolCallLog.push({ agent: agentName, task: toolUse.input.task, result });
-
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolUse.id,
-          content: result,
-        });
-      }
+        return { type: 'tool_result', tool_use_id: toolUse.id, content: result };
+      });
 
       messages.push({ role: 'user', content: toolResults });
       continue;
     }
 
     break;
+  }
+  } catch (err) {
+    if (isAbortError(err)) {
+      finalText = 'Run cancelled.';
+      emit({ type: 'answer', text: finalText, agent: 'Orchestrator' });
+    } else {
+      throw err;
+    }
   }
 
   if (finalText === null) {

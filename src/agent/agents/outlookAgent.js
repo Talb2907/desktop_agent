@@ -14,13 +14,14 @@ Rules:
 - Summarize results clearly — subject, sender, date for emails; title, time, location for events.
 - If Outlook is not running or not installed, say so clearly.`;
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'OutlookAgent',
     systemPrompt: SYSTEM_PROMPT,
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 

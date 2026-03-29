@@ -36,13 +36,14 @@ Rules:
 - If a page loads slowly or unexpectedly, take a screenshot to assess before retrying.
 - Be concise in your final summary — report what you found or did, not every intermediate step.`;
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'BrowserAgent',
     systemPrompt: SYSTEM_PROMPT,
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 

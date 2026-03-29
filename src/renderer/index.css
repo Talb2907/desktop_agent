@@ -8,6 +8,22 @@
   text-align: right;
 }
 
+/* Markdown prose tweaks inside dark chat bubbles */
+.prose pre {
+  background-color: #1e293b;
+  border: 1px solid #334155;
+}
+.prose code:not(pre code) {
+  background-color: #1e293b;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.prose a { color: #818cf8; }
+.prose a:hover { color: #a5b4fc; }
+.prose p:first-child { margin-top: 0; }
+.prose p:last-child { margin-bottom: 0; }
+
 /* Smooth scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

@@ -40,13 +40,14 @@ Rules:
   has:attachment, is:unread, after:YYYY/MM/DD, before:YYYY/MM/DD, etc.
 - Be concise in your final summary — report what was found or done, not every step.`;
 
-async function run(task, emit) {
+async function run(task, emit, signal) {
   return runSpecialist({
     agentName: 'GmailAgent',
     systemPrompt: SYSTEM_PROMPT,
     toolDefs,
     task,
     emit,
+    signal,
   });
 }
 
